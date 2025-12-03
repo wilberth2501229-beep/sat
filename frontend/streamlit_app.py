@@ -17,6 +17,8 @@ if "user" not in st.session_state:
     st.session_state.user = None
 if "backend_status" not in st.session_state:
     st.session_state.backend_status = None
+if "show_update_creds" not in st.session_state:
+    st.session_state.show_update_creds = False
 
 
 def check_backend_health():
@@ -52,7 +54,7 @@ def show_connection_status():
     )
 
 
-def api_request(endpoint: str, method: str = "GET", data: dict = None, files: dict = None, form_data: bool = False):
+def api_request(endpoint: str, method: str = "GET", data: dict = None, files: dict = None, form_data: bool = False, params: dict = None):
     """Make API request with authentication"""
     headers = {}
     if st.session_state.token:
@@ -62,18 +64,18 @@ def api_request(endpoint: str, method: str = "GET", data: dict = None, files: di
     
     try:
         if method == "GET":
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, params=params)
         elif method == "POST":
             if files:
-                response = requests.post(url, headers=headers, data=data, files=files)
+                response = requests.post(url, headers=headers, data=data, files=files, params=params)
             elif form_data:
-                response = requests.post(url, headers=headers, data=data)
+                response = requests.post(url, headers=headers, data=data, params=params)
             else:
-                response = requests.post(url, headers=headers, json=data)
+                response = requests.post(url, headers=headers, json=data, params=params)
         elif method == "PUT":
-            response = requests.put(url, headers=headers, json=data)
+            response = requests.put(url, headers=headers, json=data, params=params)
         elif method == "DELETE":
-            response = requests.delete(url, headers=headers)
+            response = requests.delete(url, headers=headers, params=params)
         
         return response
     except requests.exceptions.ConnectionError:
@@ -173,10 +175,11 @@ def dashboard_page():
             st.rerun()
     
     # Main tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📋 Dashboard", 
         "👤 Perfil Fiscal", 
         "📄 Documentos",
+        "🧾 CFDIs",
         "🔐 Credenciales SAT"
     ])
     
@@ -190,6 +193,9 @@ def dashboard_page():
         show_documents()
     
     with tab4:
+        show_cfdis()
+    
+    with tab5:
         show_sat_credentials()
 
 
@@ -319,38 +325,370 @@ def show_sat_credentials():
     
     st.warning("⚠️ Tus credenciales se almacenan de forma segura con encriptación AES-256")
     
-    response = api_request("/fiscal/sat-credentials")
+    # Check if credentials exist
+    response = api_request("/credentials/sat", "GET")
     
     if response and response.status_code == 200:
         creds = response.json()
         
-        st.success("✅ Credenciales SAT configuradas")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Contraseña SAT", "Configurada ✓")
-        with col2:
-            efirma_status = "Configurada ✓" if creds.get("has_efirma") else "No configurada"
-            st.metric("e.firma", efirma_status)
-        
-        if st.button("🔄 Actualizar Credenciales"):
-            st.rerun()
-    
+        if creds.get("has_credentials"):
+            st.success("✅ Credenciales SAT configuradas")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Contraseña SAT", "Configurada ✓" if creds.get("has_password") else "No")
+            with col2:
+                efirma_status = "Configurada ✓" if creds.get("has_efirma") else "No"
+                st.metric("e.firma", efirma_status)
+            with col3:
+                if creds.get("last_validated"):
+                    st.metric("Última validación", creds.get("last_validated"))
+            
+            # Option to update or delete
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 Actualizar Contraseña"):
+                    st.session_state.show_update_creds = True
+            with col2:
+                if st.button("🗑️ Eliminar Credenciales"):
+                    delete_response = api_request("/credentials/sat", "DELETE")
+                    if delete_response and delete_response.status_code == 200:
+                        st.success("✅ Credenciales eliminadas")
+                        st.rerun()
+                    else:
+                        st.error("❌ Error al eliminar credenciales")
+            
+            # Update form
+            if st.session_state.get("show_update_creds"):
+                st.divider()
+                with st.form("update_sat_creds_form"):
+                    new_password = st.text_input("Nueva contraseña SAT", type="password")
+                    submit = st.form_submit_button("✅ Actualizar")
+                    
+                    if submit and new_password:
+                        update_response = api_request("/credentials/sat", "PUT", {
+                            "sat_password": new_password
+                        })
+                        if update_response and update_response.status_code == 200:
+                            st.success("✅ Credenciales actualizadas")
+                            st.session_state.show_update_creds = False
+                            st.rerun()
+                        else:
+                            st.error("❌ Error al actualizar credenciales")
+        else:
+            st.info("📝 Configura tus credenciales para automatizar consultas al SAT")
+            
+            with st.form("sat_creds_form"):
+                sat_password = st.text_input("Contraseña del Portal SAT", type="password")
+                
+                st.subheader("e.firma (Opcional)")
+                cer_file = st.file_uploader("Certificado .cer", type=["cer"])
+                key_file = st.file_uploader("Llave privada .key", type=["key"])
+                efirma_password = st.text_input("Contraseña e.firma", type="password") if (cer_file and key_file) else None
+                
+                submit = st.form_submit_button("💾 Guardar Credenciales")
+                
+                if submit:
+                    if not sat_password:
+                        st.error("❌ Debes ingresar la contraseña del SAT")
+                    else:
+                        # Save SAT password
+                        save_response = api_request("/credentials/sat", "POST", {
+                            "sat_password": sat_password,
+                            "rfc": None
+                        })
+                        
+                        if save_response and save_response.status_code in [200, 201]:
+                            st.success("✅ Contraseña SAT guardada")
+                            
+                            # Upload e.firma if provided
+                            if cer_file and key_file:
+                                files = {
+                                    "cer_file": cer_file,
+                                    "key_file": key_file
+                                }
+                                data = {"efirma_password": efirma_password} if efirma_password else {}
+                                
+                                efirma_response = api_request("/credentials/efirma/upload", "POST", data=data, files=files)
+                                if efirma_response and efirma_response.status_code in [200, 201]:
+                                    st.success("✅ Certificados e.firma cargados")
+                                else:
+                                    st.warning("⚠️ Credenciales guardadas, pero hubo un error al cargar e.firma")
+                            
+                            st.rerun()
+                        else:
+                            st.error("❌ Error al guardar credenciales")
     else:
-        st.info("📝 Configura tus credenciales para automatizar consultas al SAT")
+        st.error("❌ Error al conectar con el servidor")
+
+
+def show_cfdis():
+    """CFDI (Factura Electrónica) management"""
+    st.header("🧾 Facturas Electrónicas (CFDIs)")
+    
+    # Check if credentials are configured
+    creds_response = api_request("/credentials/sat", "GET")
+    
+    if not creds_response or not creds_response.json().get("has_credentials"):
+        st.warning("⚠️ Debes configurar tus credenciales SAT primero para ver CFDIs")
+        st.info("Dirígete a la pestaña '🔐 Credenciales SAT' para configurarlas")
+        return
+    
+    # Initialize session state for filters
+    if "cfdi_year" not in st.session_state:
+        st.session_state.cfdi_year = datetime.now().year
+    if "cfdi_month" not in st.session_state:
+        st.session_state.cfdi_month = datetime.now().month
+    
+    # Sync button at top
+    col_sync = st.columns(1)[0]
+    with col_sync:
+        if st.button("🔄 Sincronizar CFDIs desde SAT", key="sync_cfdis_top", use_container_width=True):
+            with st.spinner("⏳ Sincronizando con SAT..."):
+                sync_response = api_request("/cfdi/sync", "POST")
+                if sync_response and sync_response.status_code == 200:
+                    st.success("✅ Sincronización completada")
+                    st.rerun()
+                else:
+                    st.error("❌ Error en sincronización")
+    
+    st.divider()
+    
+    # Get statistics
+    stats_response = api_request("/cfdi/statistics", "GET")
+    
+    if stats_response and stats_response.status_code == 200:
+        stats = stats_response.json()
         
-        with st.form("sat_creds_form"):
-            sat_password = st.text_input("Contraseña del Portal SAT", type="password")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("📤 CFDIs Emitidos", stats.get("total_emitidos", 0))
+        
+        with col2:
+            st.metric("📥 CFDIs Recibidos", stats.get("total_recibidos", 0))
+        
+        with col3:
+            st.metric("💰 Monto Emitido", f"${stats.get('monto_total_emitido', 0):,.2f}")
+        
+        with col4:
+            st.metric("💵 Monto Recibido", f"${stats.get('monto_total_recibido', 0):,.2f}")
+    
+    st.divider()
+    
+    # Advanced Filters
+    st.subheader("🔍 Filtros Avanzados")
+    
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+    
+    with filter_col1:
+        cfdi_type = st.selectbox("📋 Tipo de CFDI", 
+                                ["emitido", "recibido", "todos"],
+                                key="cfdi_type_select")
+    
+    with filter_col2:
+        status_filter = st.selectbox("✅ Estado", 
+                                    ["vigente", "cancelado", "todos"],
+                                    key="cfdi_status_select")
+    
+    with filter_col3:
+        selected_year = st.selectbox("📅 Año", 
+                                    range(2020, datetime.now().year + 1),
+                                    index=datetime.now().year - 2020,
+                                    key="cfdi_year_select")
+        st.session_state.cfdi_year = selected_year
+    
+    with filter_col4:
+        month_names = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                      "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        selected_month = st.selectbox("📆 Mes", 
+                                     month_names,
+                                     index=datetime.now().month - 1,
+                                     key="cfdi_month_select")
+        selected_month_num = month_names.index(selected_month) + 1
+        st.session_state.cfdi_month = selected_month_num
+    
+    st.divider()
+    
+    # Calculate date range for selected month
+    import calendar
+    first_day = datetime(selected_year, selected_month_num, 1)
+    last_day = datetime(selected_year, selected_month_num, 
+                       calendar.monthrange(selected_year, selected_month_num)[1])
+    
+    # Get CFDIs list with date filters
+    params = {
+        "cfdi_type": cfdi_type if cfdi_type != "todos" else "emitido",
+        "start_date": first_day.strftime("%Y-%m-%d"),
+        "end_date": last_day.strftime("%Y-%m-%d"),
+    }
+    if status_filter != "todos":
+        params["status"] = status_filter
+    
+    cfdis_response = api_request("/cfdi/list", "GET", params=params)
+    
+    if cfdis_response and cfdis_response.status_code == 200:
+        cfdis = cfdis_response.json()
+        
+        if not cfdis:
+            st.info("📭 No hay CFDIs para el período seleccionado")
+            st.write(f"Buscando desde {first_day.strftime('%d/%m/%Y')} hasta {last_day.strftime('%d/%m/%Y')}")
+            return
+        
+        st.success(f"✅ Se encontraron {len(cfdis)} CFDI(s)")
+        
+        # Create a dataframe
+        import pandas as pd
+        
+        df_data = []
+        for cfdi in cfdis:
+            fecha_obj = datetime.fromisoformat(cfdi["fecha"]) if isinstance(cfdi["fecha"], str) else cfdi["fecha"]
+            df_data.append({
+                "Tipo": cfdi["tipo"].upper(),
+                "Fecha": fecha_obj.strftime("%d/%m/%Y %H:%M"),
+                "Emisor": cfdi["rfc_emisor"],
+                "Receptor": cfdi["rfc_receptor"],
+                "Subtotal": cfdi["subtotal"],
+                "IVA": cfdi["total"] - cfdi["subtotal"],
+                "Total": cfdi["total"],
+                "Estado": cfdi["status"],
+                "UUID": cfdi["uuid"]
+            })
+        
+        df = pd.DataFrame(df_data)
+        
+        # Display options
+        tab1, tab2, tab3 = st.tabs(["📊 Vista Tabla", "📄 Documentos", "📈 Detalles"])
+        
+        with tab1:
+            st.subheader(f"Tabla de CFDIs - {selected_month} {selected_year}")
+            st.dataframe(df[["Tipo", "Fecha", "Emisor", "Total", "Estado"]], 
+                        use_container_width=True, 
+                        hide_index=True)
+        
+        with tab2:
+            st.subheader(f"Descargar Documentos - {selected_month} {selected_year}")
             
-            st.subheader("e.firma (Opcional)")
-            cer_file = st.file_uploader("Certificado .cer", type=["cer"])
-            key_file = st.file_uploader("Llave privada .key", type=["key"])
-            efirma_password = st.text_input("Contraseña e.firma", type="password")
+            # Group CFDIs by type
+            for idx, cfdi in enumerate(cfdis):
+                fecha_obj = datetime.fromisoformat(cfdi["fecha"]) if isinstance(cfdi["fecha"], str) else cfdi["fecha"]
+                
+                with st.container(border=True):
+                    # Header info
+                    col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+                    
+                    with col1:
+                        st.write(f"**{cfdi['tipo'].upper()}**")
+                        st.caption(f"Fecha: {fecha_obj.strftime('%d/%m/%Y %H:%M')}")
+                    
+                    with col2:
+                        st.write(f"**Total: ${cfdi['total']:,.2f}**")
+                        st.caption(f"RFC: {cfdi['rfc_emisor']}")
+                    
+                    with col3:
+                        status_emoji = "✅" if cfdi["status"] == "vigente" else "❌"
+                        st.write(f"{status_emoji} {cfdi['status'].upper()}")
+                    
+                    with col4:
+                        st.write(f"UUID: {cfdi['uuid'][:8]}...")
+                    
+                    st.divider()
+                    
+                    # Download buttons
+                    download_col1, download_col2, download_col3 = st.columns(3)
+                    
+                    with download_col1:
+                        if st.button("📥 Ver XML", key=f"view_xml_{idx}", use_container_width=True):
+                            st.session_state[f"show_xml_{idx}"] = True
+                    
+                    with download_col2:
+                        if st.button("📄 Ver PDF", key=f"view_pdf_{idx}", use_container_width=True):
+                            st.session_state[f"show_pdf_{idx}"] = True
+                    
+                    with download_col3:
+                        if st.button("💾 Descargar ZIP", key=f"download_zip_{idx}", use_container_width=True):
+                            with st.spinner("Generando descarga..."):
+                                xml_response = api_request(f"/cfdi/{cfdi['uuid']}/xml", "GET")
+                                pdf_response = api_request(f"/cfdi/{cfdi['uuid']}/pdf", "GET")
+                                
+                                if xml_response and pdf_response:
+                                    st.info("✅ Descarga lista (ZIP con XML y PDF)")
+                    
+                    # Show XML if requested
+                    if st.session_state.get(f"show_xml_{idx}"):
+                        st.divider()
+                        st.write("**📄 Contenido XML:**")
+                        try:
+                            xml_response = api_request(f"/cfdi/{cfdi['uuid']}/xml", "GET")
+                            if xml_response and xml_response.status_code == 200:
+                                xml_text = xml_response.text if hasattr(xml_response, 'text') else xml_response.content.decode()
+                                st.code(xml_text, language="xml", line_numbers=True)
+                                
+                                st.download_button(
+                                    label="📥 Descargar XML",
+                                    data=xml_response.content if hasattr(xml_response, 'content') else xml_text.encode(),
+                                    file_name=f"CFDI_{cfdi['uuid']}.xml",
+                                    mime="application/xml",
+                                    key=f"dl_xml_{idx}"
+                                )
+                        except Exception as e:
+                            st.error(f"Error al obtener XML: {str(e)}")
+                    
+                    # Show PDF if requested
+                    if st.session_state.get(f"show_pdf_{idx}"):
+                        st.divider()
+                        st.write("**📋 Documento PDF:**")
+                        try:
+                            pdf_response = api_request(f"/cfdi/{cfdi['uuid']}/pdf", "GET")
+                            if pdf_response and pdf_response.status_code == 200:
+                                st.write("✅ PDF generado correctamente")
+                                st.download_button(
+                                    label="📥 Descargar PDF",
+                                    data=pdf_response.content,
+                                    file_name=f"CFDI_{cfdi['uuid']}.pdf",
+                                    mime="application/pdf",
+                                    key=f"dl_pdf_{idx}"
+                                )
+                        except Exception as e:
+                            st.error(f"Error al obtener PDF: {str(e)}")
+        
+        with tab3:
+            st.subheader(f"Detalles Completos - {selected_month} {selected_year}")
             
-            submit = st.form_submit_button("💾 Guardar Credenciales")
-            
-            if submit:
-                st.info("🚧 Endpoint de credenciales en desarrollo")
+            for idx, cfdi in enumerate(cfdis):
+                fecha_obj = datetime.fromisoformat(cfdi["fecha"]) if isinstance(cfdi["fecha"], str) else cfdi["fecha"]
+                
+                with st.expander(f"🧾 {cfdi['tipo'].upper()} - {fecha_obj.strftime('%d/%m/%Y')} - ${cfdi['total']:,.2f}"):
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write("**Información General**")
+                        st.write(f"• UUID: `{cfdi['uuid']}`")
+                        st.write(f"• Tipo: {cfdi['tipo']}")
+                        st.write(f"• Fecha: {fecha_obj.strftime('%d/%m/%Y %H:%M:%S')}")
+                        st.write(f"• Estado: {cfdi['status']}")
+                        st.write(f"• Moneda: {cfdi['moneda']}")
+                    
+                    with col2:
+                        st.write("**Información Fiscal**")
+                        st.write(f"• RFC Emisor: `{cfdi['rfc_emisor']}`")
+                        st.write(f"• Emisor: {cfdi['nombre_emisor']}")
+                        st.write(f"• RFC Receptor: `{cfdi['rfc_receptor']}`")
+                        st.write(f"• Receptor: {cfdi['nombre_receptor']}")
+                    
+                    st.divider()
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Subtotal", f"${cfdi['subtotal']:,.2f}")
+                    with col2:
+                        iva = cfdi['total'] - cfdi['subtotal']
+                        st.metric("IVA", f"${iva:,.2f}")
+                    with col3:
+                        st.metric("Total", f"${cfdi['total']:,.2f}")
+    else:
+        st.error("❌ Error al obtener CFDIs del servidor")
 
 
 def main():
