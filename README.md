@@ -46,15 +46,29 @@ Abre: **http://localhost:8501**
 
 ```bash
 # 1. Instalar dependencias del sistema
-sudo pacman -S postgresql redis python libxml2 libxslt  # Arch
-# o
-sudo apt install postgresql redis libxml2-dev libxslt1-dev  # Ubuntu/Debian
 
-# 2. Iniciar servicios
+## macOS
+brew install postgresql@15 redis libxml2 libxslt python@3.13
+brew services start postgresql@15
+brew services start redis
+
+## Arch Linux
+sudo pacman -S postgresql redis python libxml2 libxslt
+
+## Ubuntu/Debian
+sudo apt install postgresql redis libxml2-dev libxslt1-dev
+
+# 2. Iniciar servicios (solo Linux)
 sudo systemctl start postgresql redis
 sudo systemctl enable postgresql redis
 
 # 3. Crear base de datos
+
+## macOS
+createuser -s $USER  # No requiere sudo
+createdb sat_db
+
+## Linux
 sudo -u postgres createuser -s $USER
 createdb sat_db
 

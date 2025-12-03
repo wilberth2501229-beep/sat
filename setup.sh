@@ -34,7 +34,12 @@ echo ""
 
 # Install system dependencies based on OS
 echo "📦 Instalando dependencias del sistema..."
-if command -v pacman &> /dev/null; then
+if command -v brew &> /dev/null; then
+    echo "   Detectado: macOS (Homebrew)"
+    brew install postgresql@15 redis libxml2 libxslt
+    brew services start postgresql@15
+    brew services start redis
+elif command -v pacman &> /dev/null; then
     echo "   Detectado: Arch Linux"
     sudo pacman -S --needed postgresql redis libxml2 libxslt
 elif command -v apt &> /dev/null; then
@@ -53,18 +58,35 @@ fi
 # Start and enable services
 echo ""
 echo "🚀 Iniciando servicios..."
-sudo systemctl start postgresql redis || sudo systemctl start postgresql valkey
-sudo systemctl enable postgresql redis || sudo systemctl enable postgresql valkey
+if command -v brew &> /dev/null; then
+    # macOS - services already started with brew services
+    echo "✅ Servicios iniciados con Homebrew"
+else
+    # Linux - use systemctl
+    sudo systemctl start postgresql redis || sudo systemctl start postgresql valkey
+    sudo systemctl enable postgresql redis || sudo systemctl enable postgresql valkey
+fi
 
 # Setup PostgreSQL
 echo ""
 echo "🗄️  Configurando PostgreSQL..."
-if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw sat_db; then
-    sudo -u postgres createuser -s $USER 2>/dev/null || echo "Usuario ya existe"
-    createdb sat_db
-    echo "✅ Base de datos 'sat_db' creada"
+if command -v brew &> /dev/null; then
+    # macOS - no sudo needed
+    if ! psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw sat_db; then
+        createdb sat_db 2>/dev/null || echo "Base de datos ya existe"
+        echo "✅ Base de datos 'sat_db' creada"
+    else
+        echo "✅ Base de datos 'sat_db' ya existe"
+    fi
 else
-    echo "✅ Base de datos 'sat_db' ya existe"
+    # Linux - needs postgres user
+    if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw sat_db; then
+        sudo -u postgres createuser -s $USER 2>/dev/null || echo "Usuario ya existe"
+        createdb sat_db
+        echo "✅ Base de datos 'sat_db' creada"
+    else
+        echo "✅ Base de datos 'sat_db' ya existe"
+    fi
 fi
 
 # Create .env from example
