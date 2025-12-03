@@ -29,15 +29,27 @@ def check_backend_health():
 
 
 def show_connection_status():
-    """Display connection status indicator in sidebar"""
+    """Display connection status indicator in bottom right corner"""
     is_connected = check_backend_health()
     st.session_state.backend_status = is_connected
     
-    with st.sidebar:
-        if is_connected:
-            st.success("🟢 **Backend Conectado**")
-        else:
-            st.error("🔴 **Backend Desconectado**")
+    status_color = "#28a745" if is_connected else "#dc3545"
+    status_text = "Conectado" if is_connected else "Desconectado"
+    status_icon = "🟢" if is_connected else "🔴"
+    
+    st.markdown(
+        f"""
+        <div style="position: fixed; bottom: 20px; right: 20px; z-index: 999; 
+                    background: white; border: 1px solid {status_color}; 
+                    border-radius: 8px; padding: 6px 12px; 
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                    font-size: 12px;">
+            <span style="margin-right: 4px;">{status_icon}</span>
+            <span style="color: {status_color}; font-weight: 500;">{status_text}</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 def api_request(endpoint: str, method: str = "GET", data: dict = None, files: dict = None, form_data: bool = False):
@@ -75,7 +87,6 @@ def api_request(endpoint: str, method: str = "GET", data: dict = None, files: di
 def login_page():
     """Login/Register page"""
     st.title("🏛️ Gestor Fiscal Personal SAT")
-    show_connection_status()
     
     tab1, tab2 = st.tabs(["Iniciar Sesión", "Registrarse"])
     
@@ -153,8 +164,6 @@ def dashboard_page():
     
     # Sidebar
     with st.sidebar:
-        show_connection_status()
-        st.divider()
         st.write(f"👤 {st.session_state.user['first_name']} {st.session_state.user['last_name']}")
         st.write(f"📧 {st.session_state.user['email']}")
         
@@ -352,14 +361,14 @@ def main():
         layout="wide"
     )
     
-    # Show connection status indicator
-    show_connection_status()
-    
     # Check if logged in
     if st.session_state.token is None:
         login_page()
     else:
         dashboard_page()
+    
+    # Show connection status indicator at the end
+    show_connection_status()
 
 
 if __name__ == "__main__":
