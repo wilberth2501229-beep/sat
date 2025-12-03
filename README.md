@@ -33,6 +33,8 @@ El script instalará todo automáticamente. Luego solo ejecuta:
 
 Abre: **http://localhost:8501**
 
+> **⚠️ Usuarios de macOS:** Si encuentras errores con PostgreSQL durante la instalación, consulta [MACOS_TROUBLESHOOTING.md](MACOS_TROUBLESHOOTING.md) para soluciones específicas.
+
 ### Opción 2: Instalación Manual
 
 #### Requisitos

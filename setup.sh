@@ -36,9 +36,21 @@ echo ""
 echo "📦 Instalando dependencias del sistema..."
 if command -v brew &> /dev/null; then
     echo "   Detectado: macOS (Homebrew)"
-    brew install postgresql@15 redis libxml2 libxslt
-    brew services start postgresql@15
-    brew services start redis
+    
+    # Check if PostgreSQL is already installed
+    if brew list postgresql@15 &>/dev/null || brew list postgresql &>/dev/null; then
+        echo "   PostgreSQL ya está instalado"
+    else
+        brew install postgresql@15
+    fi
+    
+    # Install other dependencies
+    brew install redis libxml2 libxslt 2>/dev/null || echo "   Paquetes ya instalados"
+    
+    # Try to start services, ignore errors if already running
+    echo "   Iniciando servicios..."
+    brew services start postgresql@15 2>/dev/null || brew services restart postgresql@15 2>/dev/null || echo "   PostgreSQL: usando instancia existente"
+    brew services start redis 2>/dev/null || brew services restart redis 2>/dev/null || echo "   Redis: usando instancia existente"
 elif command -v pacman &> /dev/null; then
     echo "   Detectado: Arch Linux"
     sudo pacman -S --needed postgresql redis libxml2 libxslt
@@ -71,10 +83,21 @@ fi
 echo ""
 echo "🗄️  Configurando PostgreSQL..."
 if command -v brew &> /dev/null; then
-    # macOS - no sudo needed
+    # macOS - wait for PostgreSQL to be ready
+    echo "   Esperando a que PostgreSQL esté listo..."
+    sleep 3
+    
+    # Try to connect and create database
+    for i in {1..10}; do
+        if psql postgres -c "SELECT 1" &>/dev/null; then
+            break
+        fi
+        echo "   Reintento $i/10..."
+        sleep 2
+    done
+    
     if ! psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw sat_db; then
-        createdb sat_db 2>/dev/null || echo "Base de datos ya existe"
-        echo "✅ Base de datos 'sat_db' creada"
+        createdb sat_db 2>/dev/null && echo "✅ Base de datos 'sat_db' creada" || echo "⚠️  No se pudo crear la base de datos automáticamente. Créala manualmente con: createdb sat_db"
     else
         echo "✅ Base de datos 'sat_db' ya existe"
     fi
