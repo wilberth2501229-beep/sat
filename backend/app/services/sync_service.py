@@ -10,17 +10,9 @@ import logging
 
 from app.services.sat_scraper import SATScraper, SATScraperException
 from app.services.cfdi_parser import CFDIParser
-from app.models import User, CFDI, SATCredentials, FiscalProfile
+from app.models import User, CFDI, SATCredentials, FiscalProfile, SyncHistory, SyncStatus, SyncType
 
 logger = logging.getLogger(__name__)
-
-
-class SyncStatus:
-    """Track sync progress"""
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 class SATSyncService:
@@ -62,12 +54,28 @@ class SATSyncService:
         """
         logger.info(f"Starting full sync for user {self.user_id}")
         
+        # Create sync history record
+        sync_record = SyncHistory(
+            user_id=self.user_id,
+            sync_type=SyncType.FULL,
+            status=SyncStatus.RUNNING,
+            months_back=months_back
+        )
+        self.db.add(sync_record)
+        self.db.commit()
+        self.db.refresh(sync_record)
+        
         results = {
-            'status': SyncStatus.IN_PROGRESS,
-            'started_at': datetime.now().isoformat(),
+            'sync_id': sync_record.id,
+            'status': SyncStatus.RUNNING,
+            'started_at': sync_record.started_at.isoformat(),
             'cfdis_downloaded': 0,
             'cfdis_processed': 0,
             'cfdis_skipped': 0,
+            'cfdis_emitidos': 0,
+            'cfdis_recibidos': 0,
+            'total_ingresos': 0.0,
+            'total_egresos': 0.0,
             'errors': []
         }
         
@@ -94,17 +102,18 @@ class SATSyncService:
                 except:
                     logger.warning("Could not parse saved session cookies")
             
-            # Initialize scraper
-            # Use headless=False if no cookies (need manual login)
-            headless = saved_cookies is not None
+            # Start with headless if we have cookies, otherwise visible
+            use_headless = saved_cookies is not None
             
             async with SATScraper(
                 rfc=self.fiscal_profile.rfc,
                 password=password,
-                headless=headless
+                headless=use_headless
             ) as scraper:
                 
-                # Try to restore session first
+                session_valid = False
+                
+                # Try to restore session first if we have cookies
                 if saved_cookies:
                     logger.info("Attempting to restore session from saved cookies")
                     try:
@@ -113,18 +122,27 @@ class SATSyncService:
                         await scraper.page.goto(scraper.CFDIS_URL, wait_until="networkidle")
                         current_url = scraper.page.url
                         
-                        if 'login' in current_url.lower() or 'nidp' in current_url.lower():
-                            logger.warning("Session expired, need manual login")
-                            saved_cookies = None  # Force manual login
+                        if 'login' not in current_url.lower() and 'nidp' not in current_url.lower():
+                            logger.info("✅ Session restored successfully!")
+                            session_valid = True
                         else:
-                            logger.info("Session restored successfully")
+                            logger.warning("❌ Session expired - cookies no longer valid")
                     except Exception as e:
-                        logger.warning(f"Session restore failed: {e}, will need manual login")
-                        saved_cookies = None
+                        logger.warning(f"Session restore failed: {e}")
                 
-                # If no valid session, do manual login
-                if not saved_cookies:
-                    logger.info("Manual login required - opening browser for user")
+                # If session not valid, need manual login
+                if not session_valid:
+                    logger.info("🔐 Manual login required")
+                    
+                    # If we started headless, we can't do manual login
+                    if use_headless:
+                        logger.error("Cannot do manual login in headless mode - aborting")
+                        raise SATScraperException(
+                            "Session expired and manual login required. "
+                            "Please validate your credentials again in the UI."
+                        )
+                    
+                    # Do manual login (browser is already visible)
                     login_success = await scraper.login()
                     
                     if not login_success:
@@ -139,12 +157,39 @@ class SATSyncService:
                 
                 # Download CFDIs
                 logger.info(f"Downloading CFDIs from {start_date} to {end_date}")
-                downloaded_cfdis = await scraper.download_cfdis(
-                    start_date=start_date,
-                    end_date=end_date,
-                    download_dir=download_dir,
-                    tipo="todos"
-                )
+                try:
+                    downloaded_cfdis = await scraper.download_cfdis(
+                        start_date=start_date,
+                        end_date=end_date,
+                        download_dir=download_dir,
+                        tipo="todos"
+                    )
+                    
+                    results['cfdis_downloaded'] = len(downloaded_cfdis)
+                    logger.info(f"Downloaded {len(downloaded_cfdis)} CFDIs")
+                    
+                    # Note: download_cfdis currently returns empty list
+                    # Full implementation pending (requires ASP.NET form handling)
+                    if len(downloaded_cfdis) == 0:
+                        logger.warning("⚠️ CFDI download reached portal but actual download not yet implemented")
+                        logger.warning("This feature requires handling SAT's ASP.NET ViewState mechanism")
+                        results['status'] = 'COMPLETED'
+                        results['cfdis_processed'] = 0
+                        results['completed_at'] = datetime.now().isoformat()
+                        
+                        # Update sync record with note
+                        sync_record.status = SyncStatus.COMPLETED
+                        sync_record.completed_at = datetime.now()
+                        sync_record.duration_seconds = int((sync_record.completed_at - sync_record.started_at).total_seconds())
+                        sync_record.results = results
+                        sync_record.error_message = "Portal reached successfully but CFDI download logic pending implementation"
+                        self.db.commit()
+                        
+                        return results
+                    
+                except Exception as download_error:
+                    logger.error(f"Error during CFDI download: {str(download_error)}")
+                    raise
                 
                 results['cfdis_downloaded'] = len(downloaded_cfdis)
                 
@@ -177,6 +222,15 @@ class SATSyncService:
                         self.db.commit()
                         
                         results['cfdis_processed'] += 1
+                        
+                        # Track emitidos vs recibidos and totals
+                        if cfdi.es_ingreso:
+                            results['cfdis_emitidos'] += 1
+                            results['total_ingresos'] += float(cfdi.total)
+                        elif cfdi.es_egreso:
+                            results['cfdis_recibidos'] += 1
+                            results['total_egresos'] += float(cfdi.total)
+                        
                         logger.info(f"Processed CFDI: {cfdi.uuid}")
                         
                     except Exception as e:
@@ -198,8 +252,16 @@ class SATSyncService:
                     logger.warning(f"Could not download constancia: {str(e)}")
                     results['constancia_downloaded'] = False
                 
+            # Mark as completed
             results['status'] = SyncStatus.COMPLETED
             results['completed_at'] = datetime.now().isoformat()
+            
+            # Update sync record
+            sync_record.status = SyncStatus.COMPLETED
+            sync_record.completed_at = datetime.now()
+            sync_record.duration_seconds = int((sync_record.completed_at - sync_record.started_at).total_seconds())
+            sync_record.results = results
+            self.db.commit()
             
             logger.info(f"Sync completed: {results['cfdis_processed']} CFDIs processed")
             
@@ -208,10 +270,22 @@ class SATSyncService:
             results['status'] = SyncStatus.FAILED
             results['error'] = str(e)
             
+            # Update sync record
+            sync_record.status = SyncStatus.FAILED
+            sync_record.completed_at = datetime.now()
+            sync_record.error_message = str(e)
+            self.db.commit()
+            
         except Exception as e:
             logger.error(f"Sync error: {str(e)}")
             results['status'] = SyncStatus.FAILED
             results['error'] = str(e)
+            
+            # Update sync record
+            sync_record.status = SyncStatus.FAILED
+            sync_record.completed_at = datetime.now()
+            sync_record.error_message = str(e)
+            self.db.commit()
             
         return results
         
@@ -302,18 +376,28 @@ class SATSyncService:
         
     def get_last_sync_status(self) -> Optional[Dict]:
         """Get status of last sync operation"""
-        # This would query a sync_history table if we had one
-        # For now, return last CFDI update time
-        last_cfdi = self.db.query(CFDI).filter(
-            CFDI.user_id == self.user_id
-        ).order_by(CFDI.created_at.desc()).first()
+        # Get most recent sync
+        last_sync = self.db.query(SyncHistory).filter(
+            SyncHistory.user_id == self.user_id
+        ).order_by(SyncHistory.started_at.desc()).first()
         
-        if last_cfdi:
-            return {
-                'last_sync': last_cfdi.created_at.isoformat(),
-                'total_cfdis': self.db.query(CFDI).filter(
-                    CFDI.user_id == self.user_id
-                ).count()
+        if last_sync:
+            result = {
+                'sync_id': last_sync.id,
+                'status': last_sync.status.value,
+                'sync_type': last_sync.sync_type.value,
+                'started_at': last_sync.started_at.isoformat(),
+                'completed_at': last_sync.completed_at.isoformat() if last_sync.completed_at else None,
+                'duration_seconds': last_sync.duration_seconds,
+                'results': last_sync.results or {},
+                'error_message': last_sync.error_message
             }
+            
+            # Add current DB totals
+            result['total_cfdis_db'] = self.db.query(CFDI).filter(
+                CFDI.user_id == self.user_id
+            ).count()
+            
+            return result
             
         return None

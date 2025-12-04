@@ -59,6 +59,7 @@ class User(Base):
     audit_logs = relationship("AuditLog", back_populates="user")
     cfdis = relationship("CFDI", back_populates="user")
     prestaciones = relationship("PrestacionAnual", back_populates="user")
+    sync_history = relationship("SyncHistory", back_populates="user")
     
     def __repr__(self):
         return f"<User {self.email}>"

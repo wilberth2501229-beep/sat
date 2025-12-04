@@ -26,9 +26,12 @@ class SATScraper:
     """
     
     BASE_URL = "https://www.sat.gob.mx"
-    # Portal actualizado 2025 - CFDI sin e.firma
+    # Portal actualizado 2025 - CFDI URLs
     CFDIS_URL = "https://portalcfdi.facturaelectronica.sat.gob.mx"
-    # URL alternativa para login solo con CIEC (sin e.firma)
+    CONSULTA_EMISOR_URL = "https://portalcfdi.facturaelectronica.sat.gob.mx/ConsultaEmisor.aspx"
+    CONSULTA_RECEPTOR_URL = "https://portalcfdi.facturaelectronica.sat.gob.mx/ConsultaReceptor.aspx"
+    CONSULTA_DESCARGA_MASIVA_URL = "https://portalcfdi.facturaelectronica.sat.gob.mx/ConsultaDescargaMasiva.aspx"
+    # URL para login solo con CIEC (sin e.firma)
     LOGIN_CIEC_URL = "https://cfdiau.sat.gob.mx/nidp/app/login?id=SATx509Custom&sid=0&option=credential&sid=0"
     
     def __init__(self, rfc: str, password: str, headless: bool = True):
@@ -409,15 +412,59 @@ class SATScraper:
         logging.info(f"Downloading CFDIs from {start_date} to {end_date}")
         
         try:
-            # Navigate to CFDI section
-            await self.page.goto(f"{self.CFDIS_URL}/Consulta")
+            # Navigate to CFDI portal first to ensure we're logged in
+            logging.info(f"Navigating to CFDI portal: {self.CFDIS_URL}")
+            await self.page.goto(self.CFDIS_URL, wait_until="networkidle", timeout=30000)
             
-            # Wait for date filters
-            await self.page.wait_for_selector('input[name="fechaInicio"]')
+            # Check if we got redirected to login (session expired)
+            current_url = self.page.url
+            if 'login' in current_url.lower() or 'nidp' in current_url.lower():
+                raise SATScraperException("Session expired - please validate credentials again")
             
+            logging.info(f"Successfully at: {current_url}")
+            
+            # Use the bulk download page which is more reliable
+            logging.info(f"Navigating to bulk download: {self.CONSULTA_DESCARGA_MASIVA_URL}")
+            await self.page.goto(self.CONSULTA_DESCARGA_MASIVA_URL, wait_until="networkidle", timeout=30000)
+            
+            # Take screenshot for debugging
+            await self.page.screenshot(path="/tmp/sat_descarga_masiva.png")
+            logging.info("Screenshot saved: /tmp/sat_descarga_masiva.png")
+            
+            # Wait for the page to load - try different possible selectors
+            logging.info("Waiting for download form...")
+            try:
+                # Try common SAT form field IDs/names
+                await self.page.wait_for_selector(
+                    'input[type="text"], select, #ctl00_MainContent_RdoFechas_RdoFechas, input[id*="Fecha"]',
+                    timeout=15000
+                )
+                logging.info("✅ Found download form elements")
+            except Exception as e:
+                logging.error(f"Could not find download form. Screenshot saved to /tmp/sat_descarga_masiva.png")
+                logging.error(f"Current URL: {self.page.url}")
+                
+                # Get page content for debugging
+                content = await self.page.content()
+                with open("/tmp/sat_page_content.html", "w", encoding="utf-8") as f:
+                    f.write(content)
+                logging.error("Page HTML saved to /tmp/sat_page_content.html")
+                
+                raise SATScraperException(f"Could not find CFDI download form. Page structure may have changed. Error: {str(e)}")
+            
+            # TODO: Implement actual form filling and download
+            # The SAT portal uses ASP.NET forms which need special handling
+            # For now, return empty list and log that we reached the page
+            logging.warning("CFDI download form reached but download logic not yet implemented")
+            logging.warning("This requires handling ASP.NET ViewState and postback mechanisms")
+            
+            return []
+            
+            # OLD CODE - keeping for reference when implementing actual download
             # Fill date range
-            await self.page.fill('input[name="fechaInicio"]', start_date.strftime('%d/%m/%Y'))
-            await self.page.fill('input[name="fechaFin"]', end_date.strftime('%d/%m/%Y'))
+            # logging.info(f"Filling dates: {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
+            # await self.page.fill('input[name="fechaInicio"]', start_date.strftime('%d/%m/%Y'))
+            # await self.page.fill('input[name="fechaFin"]', end_date.strftime('%d/%m/%Y'))
             
             # Select type if filter exists
             if tipo != "todos":

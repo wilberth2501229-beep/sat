@@ -109,7 +109,12 @@ def get_sync_status(
     """
     Get synchronization status
     
-    Returns info about last sync and data statistics
+    Returns info about last sync and data statistics including:
+    - Current sync status (running/completed/failed)
+    - When it started and finished
+    - How many CFDIs were downloaded
+    - Breakdown of emitidos vs recibidos
+    - Total amounts (ingresos/egresos)
     """
     try:
         sync_service = SATSyncService(db, current_user.id)

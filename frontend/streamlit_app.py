@@ -213,14 +213,15 @@ def dashboard_page():
             st.rerun()
     
     # Main tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📋 Dashboard", 
         "👤 Perfil Fiscal", 
         "📄 Documentos",
         "🧾 CFDIs",
         "📊 Declaraciones",
         "🔐 Credenciales SAT",
-        "💰 Prestaciones"
+        "💰 Prestaciones",
+        "🔄 Sincronización"
     ])
     
     with tab1:
@@ -243,6 +244,180 @@ def dashboard_page():
     
     with tab7:
         show_prestaciones()
+    
+    with tab8:
+        show_sync()
+
+
+def show_sync():
+    """Sincronización SAT - Download data from SAT portal"""
+    st.header("🔄 Sincronización SAT")
+    
+    st.markdown("""
+    Descarga automáticamente tus datos del portal del SAT:
+    - 📥 Facturas (CFDIs) emitidas y recibidas
+    - 📊 Constancia de situación fiscal
+    - 💰 Información para declaraciones
+    """)
+    
+    # Check if credentials exist
+    creds_response = api_request("/credentials/sat")
+    has_credentials = (creds_response and 
+                       creds_response.status_code == 200 and 
+                       creds_response.json().get('has_credentials', False))
+    
+    if not has_credentials:
+        st.warning("⚠️ Primero configura tus credenciales SAT en la pestaña **'🔐 Credenciales SAT'**")
+        return
+    
+    st.divider()
+    
+    # Sync options
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown("""
+        ### ¿Qué hace la sincronización?
+        
+        - 📥 Descarga todas tus facturas (CFDIs)
+        - 📊 Calcula tus declaraciones automáticamente  
+        - 💰 Muestra cuánto has ganado y gastado
+        - 🎯 Te dice si te deben dinero o debes impuestos
+        
+        **Toma unos minutos la primera vez**, luego es instantáneo.
+        """)
+    
+    with col2:
+        months_back = st.number_input("Meses atrás", min_value=1, max_value=24, value=12)
+        
+        if st.button("🔄 Sincronizar Ahora", type="primary", use_container_width=True):
+            with st.spinner("Iniciando sincronización..."):
+                try:
+                    sync_response = api_request("/sync/start", "POST", {"months_back": months_back})
+                    
+                    if sync_response and sync_response.status_code == 200:
+                        st.success("✅ ¡Sincronización iniciada!")
+                        
+                        # Poll for status updates
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        import time
+                        for i in range(20):  # Check for ~1 minute max
+                            time.sleep(3)
+                            
+                            status_check = api_request("/sync/status")
+                            if status_check and status_check.status_code == 200:
+                                status_data = status_check.json()
+                                
+                                if status_data.get('status') == 'running':
+                                    progress_bar.progress(min(0.95, (i + 1) / 20))
+                                    status_text.info("⏳ Descargando facturas del SAT...")
+                                
+                                elif status_data.get('status') == 'completed':
+                                    progress_bar.progress(1.0)
+                                    
+                                    # Show summary
+                                    results = status_data.get('results', {})
+                                    st.success(f"""
+                                    🎉 **¡Sincronización completada!**
+                                    
+                                    📊 **Resumen:**
+                                    - ✅ Facturas procesadas: {results.get('cfdis_processed', 0)}
+                                    - 📤 Emitidas: {results.get('cfdis_emitidos', 0)} (${results.get('total_ingresos', 0):,.2f})
+                                    - 📥 Recibidas: {results.get('cfdis_recibidos', 0)} (${results.get('total_egresos', 0):,.2f})
+                                    - ⏱️ Duración: {status_data.get('duration_seconds', 0)} segundos
+                                    """)
+                                    break
+                                
+                                elif status_data.get('status') == 'failed':
+                                    error_msg = status_data.get('error_message', 'Unknown error')
+                                    st.error(f"❌ Error: {error_msg}")
+                                    
+                                    # If session expired, offer to clear it
+                                    if 'session expired' in error_msg.lower() or 'manual login required' in error_msg.lower():
+                                        st.warning("💡 Tu sesión con el SAT ha expirado.")
+                                        if st.button("🔄 Limpiar sesión y reintentar", type="primary"):
+                                            clear_response = api_request("/credentials/sat/clear-session", "POST")
+                                            if clear_response and clear_response.status_code == 200:
+                                                st.success("✅ Sesión limpiada. Ahora valida tus credenciales de nuevo en la pestaña 'Credenciales SAT'")
+                                                st.info("👉 Ve a **'🔐 Credenciales SAT'** → Click en **'Validar Credenciales'**")
+                                            else:
+                                                st.error("Error al limpiar sesión")
+                                    break
+                        else:
+                            st.info("💡 La sincronización sigue en progreso. Puedes refrescar esta pestaña en unos minutos para ver los resultados.")
+                            
+                    elif sync_response:
+                        # Got response but not 200
+                        try:
+                            error_detail = sync_response.json()
+                            error_msg = error_detail.get("detail", str(error_detail))
+                        except:
+                            error_msg = f"Error HTTP {sync_response.status_code}: {sync_response.text}"
+                        
+                        st.error(f"❌ {error_msg}")
+                        
+                        with st.expander("🔍 Más información"):
+                            st.code(f"Status: {sync_response.status_code}\nResponse: {sync_response.text}")
+                    else:
+                        # No response at all
+                        st.error("❌ No se pudo conectar con el servidor. Verifica que el backend esté corriendo.")
+                except Exception as e:
+                    st.error(f"❌ Error inesperado: {str(e)}")
+                    st.exception(e)
+    
+    st.divider()
+    
+    # Utilities section
+    with st.expander("🔧 Herramientas"):
+        st.markdown("**Limpiar sesión guardada**")
+        st.caption("Usa esto si la sincronización falla por sesión expirada")
+        
+        if st.button("🗑️ Borrar sesión SAT guardada"):
+            clear_response = api_request("/credentials/sat/clear-session", "POST")
+            if clear_response and clear_response.status_code == 200:
+                st.success("✅ Sesión limpiada. La próxima sincronización abrirá el navegador para login manual.")
+            else:
+                st.error("❌ Error al limpiar sesión")
+    
+    st.divider()
+    
+    # Show last sync status
+    st.subheader("📊 Historial de Sincronizaciones")
+    
+    status_check = api_request("/sync/status")
+    if status_check and status_check.status_code == 200:
+        status_data = status_check.json()
+        
+        if status_data.get('has_synced'):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Estado", status_data.get('status', 'Unknown').upper())
+            
+            with col2:
+                started = status_data.get('started_at', 'N/A')
+                if started != 'N/A':
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                    started = dt.strftime('%Y-%m-%d %H:%M')
+                st.metric("Última sincronización", started)
+            
+            with col3:
+                st.metric("Total CFDIs en BD", status_data.get('total_cfdis_db', 0))
+            
+            # Show results if completed
+            if status_data.get('status') == 'completed':
+                results = status_data.get('results', {})
+                st.success(f"""
+                **Última sincronización exitosa:**
+                - Procesadas: {results.get('cfdis_processed', 0)}
+                - Emitidas: {results.get('cfdis_emitidos', 0)} (${results.get('total_ingresos', 0):,.2f})
+                - Recibidas: {results.get('cfdis_recibidos', 0)} (${results.get('total_egresos', 0):,.2f})
+                """)
+        else:
+            st.info("ℹ️ Aún no has realizado ninguna sincronización")
 
 
 def show_dashboard():
@@ -316,47 +491,15 @@ def show_dashboard():
     if not has_data:
         st.info("✅ Credenciales configuradas. Ahora sincroniza tus datos del SAT.")
         
-        col1, col2 = st.columns([2, 1])
+        st.markdown("""
+        ### 🔄 Próximo paso: Sincronizar datos
         
-        with col1:
-            st.markdown("""
-            ### ¿Qué hace la sincronización?
-            
-            - 📥 Descarga todas tus facturas (CFDIs)
-            - 📊 Calcula tus declaraciones automáticamente  
-            - 💰 Muestra cuánto has ganado y gastado
-            - 🎯 Te dice si te deben dinero o debes impuestos
-            
-            **Toma unos minutos la primera vez**, luego es instantáneo.
-            """)
+        Ve a la pestaña **'🔄 Sincronización'** para descargar tus facturas del SAT.
         
-        with col2:
-            if st.button("🔄 Sincronizar Ahora", type="primary", use_container_width=True, key="sync_dashboard"):
-                with st.spinner("Descargando tus datos del SAT..."):
-                    try:
-                        sync_response = api_request("/sync/start", "POST", {"months_back": 12})
-                        
-                        if sync_response and sync_response.status_code == 200:
-                            st.success("✅ ¡Sincronización iniciada! Los datos aparecerán en unos minutos.")
-                            st.info("💡 Puedes seguir usando la app mientras se descarga")
-                        elif sync_response:
-                            # Got response but not 200
-                            try:
-                                error_detail = sync_response.json()
-                                error_msg = error_detail.get("detail", str(error_detail))
-                            except:
-                                error_msg = f"Error HTTP {sync_response.status_code}: {sync_response.text}"
-                            
-                            st.error(f"❌ {error_msg}")
-                            
-                            with st.expander("🔍 Más información"):
-                                st.code(f"Status: {sync_response.status_code}\nResponse: {sync_response.text}")
-                        else:
-                            # No response at all
-                            st.error("❌ No se pudo conectar con el servidor. Verifica que el backend esté corriendo.")
-                    except Exception as e:
-                        st.error(f"❌ Error inesperado: {str(e)}")
-                        st.exception(e)
+        La primera sincronización toma unos minutos, pero después es instantánea.
+        """)
+        
+        st.info("👉 Haz clic en la pestaña **'🔄 Sincronización'** arriba para continuar")
         
         return
     

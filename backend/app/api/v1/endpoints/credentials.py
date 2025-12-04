@@ -263,6 +263,37 @@ async def delete_sat_credentials(
     }
 
 
+@router.post("/sat/clear-session")
+async def clear_sat_session(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Clear saved SAT session cookies
+    
+    Use this when session has expired and you want to force a fresh login.
+    """
+    
+    sat_creds = db.query(SATCredentials).filter(
+        SATCredentials.user_id == current_user.id
+    ).first()
+    
+    if not sat_creds:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No credentials found"
+        )
+    
+    # Clear session token
+    sat_creds.sat_session_token = None
+    db.commit()
+    
+    return {
+        "success": True,
+        "message": "Sesión SAT limpiada. La próxima sincronización abrirá el navegador para login manual."
+    }
+
+
 @router.delete("/efirma", status_code=200)
 async def delete_efirma(
     current_user: User = Depends(get_current_user),
@@ -351,7 +382,7 @@ async def validate_credentials(
             detail=f"Error al descifrar contraseña: {str(e)}"
         )
     
-    # Try to login (headless=False para debug - ver el navegador)
+    # Try to login
     try:
         # Check if we have saved session cookies
         import json
@@ -363,57 +394,62 @@ async def validate_credentials(
             except:
                 logging.warning("Could not parse saved session cookies")
         
-        # Use headless if we have cookies, otherwise open browser for manual login
-        use_headless = saved_cookies is not None
-        
-        async with SATScraper(rfc=fiscal_profile.rfc, password=sat_password, headless=use_headless) as scraper:
-            
-            # Try to restore session first if we have cookies
-            if saved_cookies:
-                logging.info("Attempting to restore session from saved cookies")
-                try:
+        # First attempt: Try headless with saved cookies (fast validation)
+        if saved_cookies:
+            logging.info("Quick validation: checking if saved session is still valid...")
+            try:
+                async with SATScraper(rfc=fiscal_profile.rfc, password=sat_password, headless=True) as scraper:
                     await scraper.restore_session(saved_cookies)
                     # Verify session is still valid
                     await scraper.page.goto(scraper.CFDIS_URL, wait_until="networkidle", timeout=10000)
                     current_url = scraper.page.url
                     
-                    if 'login' in current_url.lower() or 'nidp' in current_url.lower():
-                        logging.warning("Session expired, will need manual login")
-                        # Session expired, need to login again
-                        success = await scraper.login()
+                    if 'login' not in current_url.lower() and 'nidp' not in current_url.lower():
+                        logging.info("✅ Session still valid - no login needed!")
+                        
+                        # Update last validated
+                        credentials.last_validated = datetime.utcnow()
+                        db.commit()
+                        
+                        return {
+                            "valid": True,
+                            "rfc": fiscal_profile.rfc,
+                            "message": "✅ Sesión activa - credenciales válidas",
+                            "session_restored": True
+                        }
                     else:
-                        logging.info("✅ Session restored successfully - no login needed!")
-                        success = True
-                except Exception as e:
-                    logging.warning(f"Session restore failed: {e}, attempting fresh login")
-                    success = await scraper.login()
-            else:
-                # No saved cookies, do fresh login
-                success = await scraper.login()
+                        logging.warning("Session expired, will open browser for manual login")
+            except Exception as e:
+                logging.warning(f"Quick validation failed: {e}, will open browser for manual login")
+        
+        # Second attempt: Session expired or no cookies - open visible browser for manual login
+        logging.info("Opening browser for manual login...")
+        async with SATScraper(rfc=fiscal_profile.rfc, password=sat_password, headless=False) as scraper:
+            success = await scraper.login()
             
-            if success:
-                # Capturar y guardar cookies de sesión
-                session_cookies = scraper.get_session_cookies()
-                if session_cookies:
-                    import json
-                    credentials.sat_session_token = json.dumps(session_cookies)
-                    logging.info(f"Saved {len(session_cookies)} session cookies")
-                
-                # Update last validated
-                credentials.last_validated = datetime.utcnow()
-                db.commit()
-                
-                return {
-                    "valid": True,
-                    "rfc": fiscal_profile.rfc,
-                    "message": "✅ Conexión exitosa con el portal SAT",
-                    "session_saved": bool(session_cookies)
-                }
-            else:
+            if not success:
                 return {
                     "valid": False,
-                    "message": "⚠️ No se pudo validar las credenciales. El portal del SAT requiere autenticación adicional (posiblemente e.firma válida o CAPTCHA). Revisa que tu e.firma no esté vencida."
+                    "message": "⚠️ No se completó el login dentro del tiempo límite (60 segundos). Intenta de nuevo."
                 }
+            
+            # Capture and save new session cookies
+            session_cookies = scraper.get_session_cookies()
+            if session_cookies:
+                credentials.sat_session_token = json.dumps(session_cookies)
+                logging.info(f"Saved {len(session_cookies)} new session cookies")
+            
+            # Update last validated
+            credentials.last_validated = datetime.utcnow()
+            db.commit()
+            
+            return {
+                "valid": True,
+                "rfc": fiscal_profile.rfc,
+                "message": "✅ Conexión exitosa con el portal SAT",
+                "session_saved": bool(session_cookies),
+                "session_restored": False
+            }
     except Exception as e:
         # Return the actual error from SAT with context
         error_msg = str(e)

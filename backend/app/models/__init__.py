@@ -8,6 +8,7 @@ from app.models.sat_credentials import SATCredentials
 from app.models.document import Document, DocumentType, DocumentStatus
 from app.models.notification import Notification, NotificationType, NotificationStatus, AuditLog, AuditAction
 from app.models.cfdi import CFDI, PrestacionAnual, TipoComprobante, CFDIStatus
+from app.models.sync_history import SyncHistory, SyncStatus, SyncType
 
 __all__ = [
     "Base",
@@ -30,4 +31,7 @@ __all__ = [
     "PrestacionAnual",
     "TipoComprobante",
     "CFDIStatus",
+    "SyncHistory",
+    "SyncStatus",
+    "SyncType",
 ]
