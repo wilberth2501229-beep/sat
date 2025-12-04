@@ -9,14 +9,18 @@ from app.core.config import settings
 from app.core.database import engine, Base
 from app.api.v1.router import api_router
 
+# Import all models to register them with Base
+import app.models  # noqa: F401
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     # Startup
     print("🚀 Starting Gestor Fiscal Personal API...")
-    # Create tables
-    # Base.metadata.create_all(bind=engine)  # Use Alembic instead
+    # Create tables automatically (only creates missing ones)
+    Base.metadata.create_all(bind=engine)
+    print("✅ Database tables ready")
     yield
     # Shutdown
     print("👋 Shutting down...")
