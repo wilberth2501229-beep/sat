@@ -1,6 +1,6 @@
 """
-Sync Service - Orchestrates SAT data synchronization
-Combines scraper, parser, and database operations
+Sync Service - Orchestrates SAT data synchronization using Web Services
+Uses official SAT SOAP APIs with e.firma authentication
 """
 from sqlalchemy.orm import Session
 from datetime import datetime, date, timedelta
@@ -8,7 +8,9 @@ from typing import Dict, List, Optional
 import os
 import logging
 
-from app.services.sat_scraper import SATScraper, SATScraperException
+from app.services.sat_webservice_client import SATWebServiceClient, TipoDescarga
+from app.services.efirma_service import EfirmaService
+from app.services.paquete_processor import PaqueteProcessor
 from app.services.cfdi_parser import CFDIParser
 from app.models import User, CFDI, SATCredentials, FiscalProfile, SyncHistory, SyncStatus, SyncType
 
@@ -31,7 +33,7 @@ class SATSyncService:
             SATCredentials.user_id == user_id
         ).first()
         
-        if not self.credentials or not self.credentials.encrypted_password:
+        if not self.credentials:
             raise ValueError("SAT credentials not configured")
             
         # Get fiscal profile for RFC
@@ -41,6 +43,13 @@ class SATSyncService:
         
         if not self.fiscal_profile or not self.fiscal_profile.rfc:
             raise ValueError("RFC not configured. Complete your fiscal profile first.")
+        
+        # Check e.firma files
+        if not self.credentials.efirma_cer_path or not self.credentials.efirma_key_path:
+            raise ValueError(
+                "e.firma files not uploaded. Please upload your .cer and .key files "
+                "in the Credentials section."
+            )
             
     async def sync_all(self, months_back: int = 12) -> Dict:
         """
@@ -80,177 +89,134 @@ class SATSyncService:
         }
         
         try:
-            # Decrypt password
+            # Decrypt e.firma password
             from app.core.security import decrypt_data
-            password = decrypt_data(self.credentials.encrypted_password)
+            
+            if not self.credentials.encrypted_efirma_password:
+                raise ValueError(
+                    "e.firma password not configured. Please upload your e.firma files "
+                    "and password in the Credentials section."
+                )
+            
+            efirma_password = decrypt_data(self.credentials.encrypted_efirma_password)
+            
+            # Initialize e.firma service
+            efirma_service = EfirmaService(
+                cer_path=self.credentials.efirma_cer_path,
+                key_path=self.credentials.efirma_key_path,
+                password=efirma_password
+            )
+            
+            # Verify certificate is valid
+            is_valid, error_msg = efirma_service.is_valid()
+            if not is_valid:
+                raise ValueError(f"e.firma certificate invalid: {error_msg}")
+            
+            logger.info(f"e.firma loaded successfully - RFC: {efirma_service.get_rfc()}")
+            
+            # Initialize Web Service client
+            ws_client = SATWebServiceClient(efirma_service)
             
             # Calculate date range
-            end_date = date.today()
+            end_date = datetime.now()
             start_date = end_date - timedelta(days=months_back * 30)
             
-            # Create download directory
-            download_dir = f"uploads/cfdis/{self.user_id}"
-            os.makedirs(download_dir, exist_ok=True)
+            logger.info(f"Requesting CFDIs from {start_date} to {end_date}")
             
-            # Check if we have saved session cookies
-            import json
-            saved_cookies = None
-            if self.credentials.sat_session_token:
+            # Download CFDIs emitidos (issued by user)
+            logger.info("📥 Downloading CFDIs emitidos...")
+            paquetes_emitidos = await ws_client.descarga_completa(
+                fecha_inicio=start_date,
+                fecha_fin=end_date,
+                tipo_descarga=TipoDescarga.EMITIDOS,
+                max_wait_minutes=30,
+                poll_interval_seconds=30
+            )
+            
+            results['cfdis_downloaded'] += len(paquetes_emitidos)
+            logger.info(f"✅ Downloaded {len(paquetes_emitidos)} packages of CFDIs emitidos")
+            
+            # Download CFDIs recibidos (received by user)
+            logger.info("📥 Downloading CFDIs recibidos...")
+            paquetes_recibidos = await ws_client.descarga_completa(
+                fecha_inicio=start_date,
+                fecha_fin=end_date,
+                tipo_descarga=TipoDescarga.RECIBIDOS,
+                max_wait_minutes=30,
+                poll_interval_seconds=30
+            )
+            
+            results['cfdis_downloaded'] += len(paquetes_recibidos)
+            logger.info(f"✅ Downloaded {len(paquetes_recibidos)} packages of CFDIs recibidos")
+            
+            # Process all packages
+            all_paquetes = [
+                (paq, 'emitido') for paq in paquetes_emitidos
+            ] + [
+                (paq, 'recibido') for paq in paquetes_recibidos
+            ]
+            
+            for paquete_bytes, tipo in all_paquetes:
                 try:
-                    saved_cookies = json.loads(self.credentials.sat_session_token)
-                    logger.info(f"Found {len(saved_cookies)} saved session cookies")
-                except:
-                    logger.warning("Could not parse saved session cookies")
-            
-            # Start with headless if we have cookies, otherwise visible
-            use_headless = saved_cookies is not None
-            
-            async with SATScraper(
-                rfc=self.fiscal_profile.rfc,
-                password=password,
-                headless=use_headless
-            ) as scraper:
-                
-                session_valid = False
-                
-                # Try to restore session first if we have cookies
-                if saved_cookies:
-                    logger.info("Attempting to restore session from saved cookies")
-                    try:
-                        await scraper.restore_session(saved_cookies)
-                        # Verify session is still valid by navigating to portal
-                        await scraper.page.goto(scraper.CFDIS_URL, wait_until="networkidle")
-                        current_url = scraper.page.url
-                        
-                        if 'login' not in current_url.lower() and 'nidp' not in current_url.lower():
-                            logger.info("✅ Session restored successfully!")
-                            session_valid = True
-                        else:
-                            logger.warning("❌ Session expired - cookies no longer valid")
-                    except Exception as e:
-                        logger.warning(f"Session restore failed: {e}")
-                
-                # If session not valid, need manual login
-                if not session_valid:
-                    logger.info("🔐 Manual login required")
+                    # Process package
+                    logger.info(f"Processing {tipo} package...")
+                    cfdis_data = PaqueteProcessor.process_paquete(paquete_bytes)
                     
-                    # If we started headless, we can't do manual login
-                    if use_headless:
-                        logger.error("Cannot do manual login in headless mode - aborting")
-                        raise SATScraperException(
-                            "Session expired and manual login required. "
-                            "Please validate your credentials again in the UI."
-                        )
-                    
-                    # Do manual login (browser is already visible)
-                    login_success = await scraper.login()
-                    
-                    if not login_success:
-                        raise SATScraperException("Login failed or was not completed within timeout")
-                    
-                    # Capture and save new session cookies
-                    new_cookies = scraper.get_session_cookies()
-                    if new_cookies:
-                        self.credentials.sat_session_token = json.dumps(new_cookies)
-                        self.db.commit()
-                        logger.info(f"Saved {len(new_cookies)} session cookies")
-                
-                # Download CFDIs
-                logger.info(f"Downloading CFDIs from {start_date} to {end_date}")
-                try:
-                    downloaded_cfdis = await scraper.download_cfdis(
-                        start_date=start_date,
-                        end_date=end_date,
-                        download_dir=download_dir,
-                        tipo="todos"
-                    )
-                    
-                    results['cfdis_downloaded'] = len(downloaded_cfdis)
-                    logger.info(f"Downloaded {len(downloaded_cfdis)} CFDIs")
-                    
-                    # Note: download_cfdis currently returns empty list
-                    # Full implementation pending (requires ASP.NET form handling)
-                    if len(downloaded_cfdis) == 0:
-                        logger.warning("⚠️ CFDI download reached portal but actual download not yet implemented")
-                        logger.warning("This feature requires handling SAT's ASP.NET ViewState mechanism")
-                        results['status'] = 'COMPLETED'
-                        results['cfdis_processed'] = 0
-                        results['completed_at'] = datetime.now().isoformat()
-                        
-                        # Update sync record with note
-                        sync_record.status = SyncStatus.COMPLETED
-                        sync_record.completed_at = datetime.now()
-                        sync_record.duration_seconds = int((sync_record.completed_at - sync_record.started_at).total_seconds())
-                        sync_record.results = results
-                        sync_record.error_message = "Portal reached successfully but CFDI download logic pending implementation"
-                        self.db.commit()
-                        
-                        return results
-                    
-                except Exception as download_error:
-                    logger.error(f"Error during CFDI download: {str(download_error)}")
-                    raise
-                
-                results['cfdis_downloaded'] = len(downloaded_cfdis)
-                
-                # Process each downloaded CFDI
-                for cfdi_info in downloaded_cfdis:
-                    try:
-                        # Check if already exists
-                        if cfdi_info.get('uuid'):
-                            existing = self.db.query(CFDI).filter(
-                                CFDI.uuid == cfdi_info['uuid'],
-                                CFDI.user_id == self.user_id
-                            ).first()
-                            
-                            if existing:
-                                results['cfdis_skipped'] += 1
+                    for cfdi_data in cfdis_data:
+                        try:
+                            # Check for parsing errors
+                            if 'error' in cfdi_data:
+                                results['errors'].append({
+                                    'tipo': tipo,
+                                    'error': f"Parse error: {cfdi_data['error']}"
+                                })
                                 continue
-                        
-                        # Read XML
-                        with open(cfdi_info['filepath'], 'r', encoding='utf-8') as f:
-                            xml_content = f.read()
-                        
-                        # Parse CFDI
-                        parser = CFDIParser(xml_content=xml_content)
-                        cfdi_data = parser.parse()
-                        
-                        # Save to database (reuse logic from cfdis endpoint)
-                        cfdi = self._create_cfdi_from_data(cfdi_data, cfdi_info['filepath'])
-                        
-                        self.db.add(cfdi)
-                        self.db.commit()
-                        
-                        results['cfdis_processed'] += 1
-                        
-                        # Track emitidos vs recibidos and totals
-                        if cfdi.es_ingreso:
-                            results['cfdis_emitidos'] += 1
-                            results['total_ingresos'] += float(cfdi.total)
-                        elif cfdi.es_egreso:
-                            results['cfdis_recibidos'] += 1
-                            results['total_egresos'] += float(cfdi.total)
-                        
-                        logger.info(f"Processed CFDI: {cfdi.uuid}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing CFDI {cfdi_info.get('filename')}: {str(e)}")
-                        results['errors'].append({
-                            'file': cfdi_info.get('filename'),
-                            'error': str(e)
-                        })
-                        continue
-                
-                # Download constancia fiscal
-                try:
-                    constancia_path = await scraper.get_constancia_fiscal(
-                        download_dir=f"uploads/documents/{self.user_id}"
-                    )
-                    if constancia_path:
-                        results['constancia_downloaded'] = True
+                            
+                            # Check if already exists
+                            uuid = cfdi_data.get('uuid')
+                            if uuid:
+                                existing = self.db.query(CFDI).filter(
+                                    CFDI.uuid == uuid,
+                                    CFDI.user_id == self.user_id
+                                ).first()
+                                
+                                if existing:
+                                    results['cfdis_skipped'] += 1
+                                    continue
+                            
+                            # Create CFDI record
+                            cfdi = self._create_cfdi_from_parsed_data(cfdi_data)
+                            self.db.add(cfdi)
+                            self.db.commit()
+                            
+                            results['cfdis_processed'] += 1
+                            
+                            # Track totals
+                            if cfdi.es_ingreso:
+                                results['cfdis_emitidos'] += 1
+                                results['total_ingresos'] += float(cfdi.total)
+                            elif cfdi.es_egreso:
+                                results['cfdis_recibidos'] += 1
+                                results['total_egresos'] += float(cfdi.total)
+                            
+                            logger.debug(f"Processed CFDI: {uuid}")
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing CFDI: {str(e)}")
+                            results['errors'].append({
+                                'tipo': tipo,
+                                'uuid': cfdi_data.get('uuid', 'unknown'),
+                                'error': str(e)
+                            })
+                            continue
+                    
                 except Exception as e:
-                    logger.warning(f"Could not download constancia: {str(e)}")
-                    results['constancia_downloaded'] = False
+                    logger.error(f"Error processing {tipo} package: {str(e)}")
+                    results['errors'].append({
+                        'tipo': tipo,
+                        'error': f"Package processing error: {str(e)}"
+                    })
+                    continue
                 
             # Mark as completed
             results['status'] = SyncStatus.COMPLETED
@@ -265,12 +231,12 @@ class SATSyncService:
             
             logger.info(f"Sync completed: {results['cfdis_processed']} CFDIs processed")
             
-        except SATScraperException as e:
-            logger.error(f"Scraper error: {str(e)}")
+        except ValueError as e:
+            # Configuration errors (missing e.firma, etc.)
+            logger.error(f"Configuration error: {str(e)}")
             results['status'] = SyncStatus.FAILED
             results['error'] = str(e)
             
-            # Update sync record
             sync_record.status = SyncStatus.FAILED
             sync_record.completed_at = datetime.now()
             sync_record.error_message = str(e)
@@ -281,7 +247,6 @@ class SATSyncService:
             results['status'] = SyncStatus.FAILED
             results['error'] = str(e)
             
-            # Update sync record
             sync_record.status = SyncStatus.FAILED
             sync_record.completed_at = datetime.now()
             sync_record.error_message = str(e)
@@ -289,68 +254,70 @@ class SATSyncService:
             
         return results
         
-    def _create_cfdi_from_data(self, cfdi_data: Dict, xml_path: str) -> CFDI:
-        """Create CFDI model from parsed data"""
+    def _create_cfdi_from_parsed_data(self, cfdi_data: Dict) -> CFDI:
+        """Create CFDI model from parsed package data (PaqueteProcessor output)"""
         from app.models import TipoComprobante, CFDIStatus
         from decimal import Decimal
         
         # Extract tax details
         impuestos = cfdi_data.get('impuestos', {})
-        iva = 0
-        isr = 0
+        iva = Decimal('0')
+        isr = Decimal('0')
         
         for traslado in impuestos.get('traslados', []):
             if traslado.get('impuesto') == '002':  # IVA
-                iva += float(traslado.get('importe', 0))
+                iva += Decimal(str(traslado.get('importe', 0)))
         
         for retencion in impuestos.get('retenciones', []):
             if retencion.get('impuesto') == '001':  # ISR
-                isr += float(retencion.get('importe', 0))
+                isr += Decimal(str(retencion.get('importe', 0)))
+        
+        # Determine tipo comprobante
+        tipo_comp = cfdi_data.get('tipo_comprobante', 'I')
         
         # Create CFDI record
         cfdi = CFDI(
             user_id=self.user_id,
-            uuid=cfdi_data['uuid'],
+            uuid=cfdi_data.get('uuid'),
             serie=cfdi_data.get('serie'),
             folio=cfdi_data.get('folio'),
             version=cfdi_data.get('version'),
-            tipo_comprobante=TipoComprobante(cfdi_data['tipo_comprobante']),
-            fecha_emision=cfdi_data['fecha'],
-            fecha_timbrado=cfdi_data.get('timbre', {}).get('fecha_timbrado'),
-            emisor_rfc=cfdi_data['emisor']['rfc'],
-            emisor_nombre=cfdi_data['emisor']['nombre'],
-            emisor_regimen_fiscal=cfdi_data['emisor'].get('regimen_fiscal'),
-            receptor_rfc=cfdi_data['receptor']['rfc'],
-            receptor_nombre=cfdi_data['receptor']['nombre'],
-            receptor_uso_cfdi=cfdi_data['receptor'].get('uso_cfdi'),
-            receptor_domicilio_fiscal=cfdi_data['receptor'].get('domicilio_fiscal'),
-            receptor_regimen_fiscal=cfdi_data['receptor'].get('regimen_fiscal'),
+            tipo_comprobante=TipoComprobante(tipo_comp),
+            fecha_emision=cfdi_data.get('fecha'),
+            fecha_timbrado=cfdi_data.get('fecha_timbrado'),
+            emisor_rfc=cfdi_data.get('emisor', {}).get('rfc'),
+            emisor_nombre=cfdi_data.get('emisor', {}).get('nombre'),
+            emisor_regimen_fiscal=cfdi_data.get('emisor', {}).get('regimen_fiscal'),
+            receptor_rfc=cfdi_data.get('receptor', {}).get('rfc'),
+            receptor_nombre=cfdi_data.get('receptor', {}).get('nombre'),
+            receptor_uso_cfdi=cfdi_data.get('receptor', {}).get('uso_cfdi'),
+            receptor_domicilio_fiscal=cfdi_data.get('receptor', {}).get('domicilio_fiscal'),
+            receptor_regimen_fiscal=cfdi_data.get('receptor', {}).get('regimen_fiscal'),
             moneda=cfdi_data.get('moneda', 'MXN'),
-            tipo_cambio=cfdi_data.get('tipo_cambio', Decimal('1.0')),
-            subtotal=cfdi_data['subtotal'],
-            descuento=cfdi_data.get('descuento', Decimal('0')),
-            total=cfdi_data['total'],
-            total_impuestos_trasladados=impuestos.get('total_impuestos_trasladados', Decimal('0')),
-            total_impuestos_retenidos=impuestos.get('total_impuestos_retenidos', Decimal('0')),
-            iva_trasladado=Decimal(str(iva)),
-            isr_retenido=Decimal(str(isr)),
+            tipo_cambio=Decimal(str(cfdi_data.get('tipo_cambio', 1))),
+            subtotal=Decimal(str(cfdi_data.get('subtotal', 0))),
+            descuento=Decimal(str(cfdi_data.get('descuento', 0))),
+            total=Decimal(str(cfdi_data.get('total', 0))),
+            total_impuestos_trasladados=Decimal(str(impuestos.get('total_traslados', 0))),
+            total_impuestos_retenidos=Decimal(str(impuestos.get('total_retenciones', 0))),
+            iva_trasladado=iva,
+            isr_retenido=isr,
             metodo_pago=cfdi_data.get('metodo_pago'),
             forma_pago=cfdi_data.get('forma_pago'),
-            es_ingreso=cfdi_data['tipo_comprobante'] == 'I',
-            es_egreso=cfdi_data['tipo_comprobante'] == 'E',
-            es_nomina=cfdi_data['tipo_comprobante'] == 'N',
-            es_deducible=self._is_deducible(cfdi_data),
+            es_ingreso=(tipo_comp == 'I'),
+            es_egreso=(tipo_comp == 'E'),
+            es_nomina=(tipo_comp == 'N'),
+            es_deducible=self._is_deducible_from_parsed(cfdi_data),
             status=CFDIStatus.VIGENTE,
             conceptos=cfdi_data.get('conceptos'),
             impuestos_detalle=impuestos,
-            timbre_data=cfdi_data.get('timbre'),
-            xml_path=xml_path
+            xml_content=cfdi_data.get('xml_content')  # Full XML stored in field
         )
         
         return cfdi
-        
-    def _is_deducible(self, cfdi_data: Dict) -> bool:
-        """Check if CFDI is tax deductible"""
+    
+    def _is_deducible_from_parsed(self, cfdi_data: Dict) -> bool:
+        """Check if CFDI is tax deductible from parsed data"""
         uso_cfdi = cfdi_data.get('receptor', {}).get('uso_cfdi', '')
         
         # Codigos de uso CFDI que son deducibles

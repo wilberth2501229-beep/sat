@@ -9,6 +9,7 @@ from app.models.document import Document, DocumentType, DocumentStatus
 from app.models.notification import Notification, NotificationType, NotificationStatus, AuditLog, AuditAction
 from app.models.cfdi import CFDI, PrestacionAnual, TipoComprobante, CFDIStatus
 from app.models.sync_history import SyncHistory, SyncStatus, SyncType
+from app.models.solicitud_descarga_sat import SolicitudDescargaSAT, EstadoSolicitudSAT
 
 __all__ = [
     "Base",
@@ -34,4 +35,6 @@ __all__ = [
     "SyncHistory",
     "SyncStatus",
     "SyncType",
+    "SolicitudDescargaSAT",
+    "EstadoSolicitudSAT",
 ]

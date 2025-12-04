@@ -60,6 +60,7 @@ class User(Base):
     cfdis = relationship("CFDI", back_populates="user")
     prestaciones = relationship("PrestacionAnual", back_populates="user")
     sync_history = relationship("SyncHistory", back_populates="user")
+    solicitudes_descarga_sat = relationship("SolicitudDescargaSAT", back_populates="user")
     
     def __repr__(self):
         return f"<User {self.email}>"

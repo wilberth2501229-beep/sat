@@ -68,6 +68,7 @@ class SyncHistory(Base):
     
     # Relationships
     user = relationship("User", back_populates="sync_history")
+    solicitudes_descarga = relationship("SolicitudDescargaSAT", back_populates="sync_history")
     
     def __repr__(self):
         return f"<SyncHistory {self.id} - {self.status} at {self.started_at}>"

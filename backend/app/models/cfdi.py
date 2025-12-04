@@ -94,6 +94,7 @@ class CFDI(Base):
     
     # Archivos
     xml_path = Column(String(512))  # Ruta al archivo XML
+    xml_content = Column(String)  # Contenido completo del XML (para Web Services)
     pdf_path = Column(String(512))  # Ruta al PDF (si existe)
     
     # Metadata
