@@ -40,7 +40,7 @@ class SATSyncService:
             SATCredentials.user_id == user_id
         ).first()
         
-        if not self.credentials or not self.credentials.sat_password_encrypted:
+        if not self.credentials or not self.credentials.encrypted_password:
             raise ValueError("SAT credentials not configured")
             
         # Get fiscal profile for RFC
@@ -49,7 +49,7 @@ class SATSyncService:
         ).first()
         
         if not self.fiscal_profile or not self.fiscal_profile.rfc:
-            raise ValueError("RFC not configured in fiscal profile")
+            raise ValueError("RFC not configured. Complete your fiscal profile first.")
             
     async def sync_all(self, months_back: int = 12) -> Dict:
         """
@@ -74,7 +74,8 @@ class SATSyncService:
         
         try:
             # Decrypt password
-            password = decrypt_password(self.credentials.sat_password_encrypted)
+            from app.core.security import decrypt_data
+            password = decrypt_data(self.credentials.encrypted_password)
             
             # Calculate date range
             end_date = date.today()
@@ -84,16 +85,58 @@ class SATSyncService:
             download_dir = f"uploads/cfdis/{self.user_id}"
             os.makedirs(download_dir, exist_ok=True)
             
+            # Check if we have saved session cookies
+            import json
+            saved_cookies = None
+            if self.credentials.sat_session_token:
+                try:
+                    saved_cookies = json.loads(self.credentials.sat_session_token)
+                    logger.info(f"Found {len(saved_cookies)} saved session cookies")
+                except:
+                    logger.warning("Could not parse saved session cookies")
+            
             # Initialize scraper
+            # Use headless=False if no cookies (need manual login)
+            headless = saved_cookies is not None
+            
             async with SATScraper(
                 rfc=self.fiscal_profile.rfc,
                 password=password,
-                headless=True
+                headless=headless
             ) as scraper:
                 
-                # Login
-                logger.info("Logging into SAT portal")
-                await scraper.login()
+                # Try to restore session first
+                if saved_cookies:
+                    logger.info("Attempting to restore session from saved cookies")
+                    try:
+                        await scraper.restore_session(saved_cookies)
+                        # Verify session is still valid by navigating to portal
+                        await scraper.page.goto(scraper.CFDIS_URL, wait_until="networkidle")
+                        current_url = scraper.page.url
+                        
+                        if 'login' in current_url.lower() or 'nidp' in current_url.lower():
+                            logger.warning("Session expired, need manual login")
+                            saved_cookies = None  # Force manual login
+                        else:
+                            logger.info("Session restored successfully")
+                    except Exception as e:
+                        logger.warning(f"Session restore failed: {e}, will need manual login")
+                        saved_cookies = None
+                
+                # If no valid session, do manual login
+                if not saved_cookies:
+                    logger.info("Manual login required - opening browser for user")
+                    login_success = await scraper.login()
+                    
+                    if not login_success:
+                        raise SATScraperException("Login failed or was not completed within timeout")
+                    
+                    # Capture and save new session cookies
+                    new_cookies = scraper.get_session_cookies()
+                    if new_cookies:
+                        self.credentials.sat_session_token = json.dumps(new_cookies)
+                        self.db.commit()
+                        logger.info(f"Saved {len(new_cookies)} session cookies")
                 
                 # Download CFDIs
                 logger.info(f"Downloading CFDIs from {start_date} to {end_date}")
