@@ -353,8 +353,43 @@ async def validate_credentials(
     
     # Try to login (headless=False para debug - ver el navegador)
     try:
-        async with SATScraper(rfc=fiscal_profile.rfc, password=sat_password, headless=False) as scraper:
-            success = await scraper.login()
+        # Check if we have saved session cookies
+        import json
+        saved_cookies = None
+        if credentials.sat_session_token:
+            try:
+                saved_cookies = json.loads(credentials.sat_session_token)
+                logging.info(f"Found {len(saved_cookies)} saved session cookies")
+            except:
+                logging.warning("Could not parse saved session cookies")
+        
+        # Use headless if we have cookies, otherwise open browser for manual login
+        use_headless = saved_cookies is not None
+        
+        async with SATScraper(rfc=fiscal_profile.rfc, password=sat_password, headless=use_headless) as scraper:
+            
+            # Try to restore session first if we have cookies
+            if saved_cookies:
+                logging.info("Attempting to restore session from saved cookies")
+                try:
+                    await scraper.restore_session(saved_cookies)
+                    # Verify session is still valid
+                    await scraper.page.goto(scraper.CFDIS_URL, wait_until="networkidle", timeout=10000)
+                    current_url = scraper.page.url
+                    
+                    if 'login' in current_url.lower() or 'nidp' in current_url.lower():
+                        logging.warning("Session expired, will need manual login")
+                        # Session expired, need to login again
+                        success = await scraper.login()
+                    else:
+                        logging.info("✅ Session restored successfully - no login needed!")
+                        success = True
+                except Exception as e:
+                    logging.warning(f"Session restore failed: {e}, attempting fresh login")
+                    success = await scraper.login()
+            else:
+                # No saved cookies, do fresh login
+                success = await scraper.login()
             
             if success:
                 # Capturar y guardar cookies de sesión

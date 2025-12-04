@@ -11,7 +11,6 @@ import logging
 from app.services.sat_scraper import SATScraper, SATScraperException
 from app.services.cfdi_parser import CFDIParser
 from app.models import User, CFDI, SATCredentials, FiscalProfile
-from app.core.security import decrypt_password
 
 logger = logging.getLogger(__name__)
 
