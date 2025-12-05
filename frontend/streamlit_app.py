@@ -1021,7 +1021,8 @@ def show_sat_credentials():
                     st.caption("¿Olvidaste tu contraseña? [Recupérala aquí](https://www.sat.gob.mx/aplicacion/53027/recupera-tu-contrasena)")
                     
                     st.divider()
-                    st.markdown("### 2️⃣ e.firma (Opcional)")
+                    st.markdown("### 2️⃣ e.firma (Obligatoria para sincronización SAT)")
+                    st.caption("⚠️ Sin e.firma no podrás descargar CFDIs del SAT")
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -1090,8 +1091,9 @@ def show_sat_credentials():
             
             1. **RFC** - Ya está en tu perfil fiscal
             2. **Contraseña del SAT** - La que usas en sat.gob.mx
+            3. **e.firma** - Obligatoria para descargar CFDIs del SAT
             
-            La **e.firma es opcional** - solo si quieres firmar documentos electrónicamente.
+            ⚠️ **Sin e.firma no podrás sincronizar datos del SAT** (descarga masiva de facturas).
             """)
             
             with st.form("sat_creds_form"):
@@ -1104,17 +1106,18 @@ def show_sat_credentials():
                 st.caption("¿Olvidaste tu contraseña? [Recupérala aquí](https://www.sat.gob.mx/aplicacion/53027/recupera-tu-contrasena)")
                 
                 st.divider()
-                st.subheader("Paso 2: e.firma (Opcional)")
-                st.caption("Solo si la tienes y quieres funciones avanzadas")
+                st.subheader("Paso 2: e.firma (Obligatoria para sincronización)")
+                st.caption("⚠️ Necesaria para descargar CFDIs del SAT mediante Web Services")
                 
                 with st.expander("¿Qué es la e.firma?"):
                     st.markdown("""
                     Es como tu firma física pero digital. Sirve para:
+                    - **Descargar CFDIs del SAT** (obligatorio)
                     - Firmar documentos oficiales
                     - Timbrar facturas
-                    - Trámites especiales
+                    - Autenticar Web Services del SAT
                     
-                    **No es obligatoria** para ver tus declaraciones y facturas.
+                    **Es OBLIGATORIA** para sincronizar con el SAT mediante Web Services.
                     """)
                 
                 col1, col2 = st.columns(2)
@@ -1123,9 +1126,15 @@ def show_sat_credentials():
                 with col2:
                     key_file = st.file_uploader("Llave .key", type=["key"])
                 
-                efirma_password = None
-                if cer_file and key_file:
-                    efirma_password = st.text_input("Contraseña e.firma (obligatoria)", type="password", key="efirma_pwd")
+                # Mostrar campo de contraseña siempre, pero deshabilitado si no hay archivos
+                efirma_password = st.text_input(
+                    "Contraseña e.firma (obligatoria)",
+                    type="password",
+                    key="efirma_pwd",
+                    disabled=not (cer_file and key_file),
+                    help="Necesaria para usar Web Services del SAT" if not (cer_file and key_file) else None,
+                    placeholder="Primero sube los archivos .cer y .key" if not (cer_file and key_file) else "Ingresa tu contraseña"
+                )
                 
                 submit = st.form_submit_button("💾 Guardar y Continuar", type="primary", use_container_width=True)
                 
