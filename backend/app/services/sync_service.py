@@ -267,6 +267,18 @@ class SATSyncService:
         """Create CFDI model from parsed package data (PaqueteProcessor output)"""
         from app.models import TipoComprobante, CFDIStatus
         from decimal import Decimal
+        from dateutil import parser as date_parser
+        
+        # Parse dates from XML strings to datetime objects
+        def parse_sat_date(date_str):
+            """Parse SAT date string to datetime object"""
+            if not date_str:
+                return None
+            try:
+                # SAT dates come as ISO format: "2024-12-04T10:30:00"
+                return date_parser.parse(date_str)
+            except:
+                return None
         
         # Extract tax details
         impuestos = cfdi_data.get('impuestos', {})
@@ -292,8 +304,8 @@ class SATSyncService:
             folio=cfdi_data.get('folio'),
             version=cfdi_data.get('version'),
             tipo_comprobante=TipoComprobante(tipo_comp),
-            fecha_emision=cfdi_data.get('fecha'),
-            fecha_timbrado=cfdi_data.get('fecha_timbrado'),
+            fecha_emision=parse_sat_date(cfdi_data.get('fecha')),
+            fecha_timbrado=parse_sat_date(cfdi_data.get('fecha_timbrado')),
             emisor_rfc=cfdi_data.get('emisor', {}).get('rfc'),
             emisor_nombre=cfdi_data.get('emisor', {}).get('nombre'),
             emisor_regimen_fiscal=cfdi_data.get('emisor', {}).get('regimen_fiscal'),
