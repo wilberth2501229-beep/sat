@@ -3,7 +3,7 @@ Sync Service - Orchestrates SAT data synchronization using Web Services
 Uses official SAT SOAP APIs with e.firma authentication
 """
 from sqlalchemy.orm import Session
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Optional
 import os
 import logging
@@ -227,11 +227,11 @@ class SATSyncService:
                 
             # Mark as completed
             results['status'] = SyncStatus.COMPLETED
-            results['completed_at'] = datetime.utcnow().isoformat()
+            results['completed_at'] = datetime.now(timezone.utc).isoformat()
             
             # Update sync record
             sync_record.status = SyncStatus.COMPLETED
-            sync_record.completed_at = datetime.utcnow()
+            sync_record.completed_at = datetime.now(timezone.utc)
             sync_record.duration_seconds = int((sync_record.completed_at - sync_record.started_at).total_seconds())
             sync_record.results = results
             self.db.commit()
@@ -246,7 +246,7 @@ class SATSyncService:
             results['error'] = error_msg
             
             sync_record.status = SyncStatus.FAILED
-            sync_record.completed_at = datetime.utcnow()
+            sync_record.completed_at = datetime.now(timezone.utc)
             sync_record.error_message = error_msg
             self.db.commit()
             
@@ -257,7 +257,7 @@ class SATSyncService:
             results['error'] = error_msg
             
             sync_record.status = SyncStatus.FAILED
-            sync_record.completed_at = datetime.utcnow()
+            sync_record.completed_at = datetime.now(timezone.utc)
             sync_record.error_message = error_msg
             self.db.commit()
             
